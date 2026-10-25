@@ -270,7 +270,7 @@ describe('create_recipe', () => {
   });
 });
 
-describe('get_stock (compact)', () => {
+describe('get_stock (compact by default)', () => {
   const entriesByLocation: Record<string, any[]> = {
     '/api/stock/locations/1/entries': [{ product_id: 2, amount: 1, best_before_date: '2026-11-01' }],
     '/api/stock/locations/2/entries': [{ product_id: 1, amount: 4, best_before_date: '2027-03-01' }],
@@ -282,9 +282,9 @@ describe('get_stock (compact)', () => {
     return undefined;
   };
 
-  it('returns short rows across all locations, sorted by name', async () => {
+  it('returns short rows across all locations, sorted by name, with no arguments', async () => {
     respond = grocyData;
-    const out = text(await client.callTool({ name: 'get_stock', arguments: { compact: true } }));
+    const out = text(await client.callTool({ name: 'get_stock', arguments: {} }));
     expect(out.count).toBe(2);
     expect(out.entries).toEqual([
       { productId: 2, name: 'Chicken thighs', amount: 1, location: 'Fridge', bestBefore: '2026-11-01' },
@@ -292,7 +292,7 @@ describe('get_stock (compact)', () => {
     ]);
   });
 
-  it('only queries the given location when locationId is set (implies compact)', async () => {
+  it('only queries the given location when locationId is set', async () => {
     respond = grocyData;
     const out = text(await client.callTool({ name: 'get_stock', arguments: { locationId: 2 } }));
     expect(out.entries.map((e: any) => e.name)).toEqual(['Tilapia']);
@@ -300,18 +300,36 @@ describe('get_stock (compact)', () => {
     expect(recorded.map((r) => r.url)).not.toContain('/api/stock/locations/1/entries');
   });
 
-  it('keeps the full /stock response when compact is not requested', async () => {
-    await client.callTool({ name: 'get_stock', arguments: {} });
+  it('returns the full /stock response only when full: true is passed', async () => {
+    await client.callTool({ name: 'get_stock', arguments: { full: true } });
     expect(recorded.map((r) => r.url)).toEqual(['/api/stock']);
+  });
+
+  it('still honours the older compact: false opt-out', async () => {
+    await client.callTool({ name: 'get_stock', arguments: { compact: false } });
+    expect(recorded.map((r) => r.url)).toEqual(['/api/stock']);
+  });
+
+  it('rejects full: true combined with locationId', async () => {
+    await expect(
+      client.callTool({ name: 'get_stock', arguments: { full: true, locationId: 2 } }),
+    ).rejects.toThrow(/cannot be combined/);
+    expect(recorded).toEqual([]);
+  });
+
+  it('advertises full and locationId but no longer a compact parameter', async () => {
+    const { tools } = await client.listTools();
+    const props = Object.keys((tools.find((t) => t.name === 'get_stock')?.inputSchema as any).properties);
+    expect(props.sort()).toEqual(['full', 'locationId']);
   });
 });
 
 describe('tool descriptions (guidance for the model)', () => {
-  it('steers the model toward compact stock and batch tools', async () => {
+  it('steers the model away from the full stock dump and toward the batch tools', async () => {
     const { tools } = await client.listTools();
     const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? '';
-    expect(desc('get_stock')).toMatch(/PREFER compact/);
-    expect(desc('get_stock')).toMatch(/context/);
+    expect(desc('get_stock')).toMatch(/full: true/);
+    expect(desc('get_stock')).toMatch(/flood your context/);
     expect(desc('purchase_product')).toMatch(/bulk_purchase_products/);
     expect(desc('create_recipe')).toMatch(/ingredients/);
     expect(desc('batch_api_calls')).toMatch(/more than two or three/);

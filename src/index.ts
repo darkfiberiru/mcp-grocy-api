@@ -580,17 +580,17 @@ class GrocyApiServer {
         },
         {
           name: 'get_stock',
-          description: 'Get current stock from your Grocy instance. PREFER compact: true (or locationId) for almost every question about what is in stock: it returns short rows (product, amount, location, best-before date). Without it the response is one row per product with the full product record embedded, which is 100k+ characters for a few dozen products and will flood your context. Only omit compact when you specifically need those full product fields (units, min-stock settings, prices). Compact rows are per stock entry, so a product bought on two dates appears twice.',
+          description: 'Get current stock from your Grocy instance as short rows, one per stock entry: product id and name, amount, location name, best-before date. A product bought on several dates appears once per entry. Pass locationId (ids from get_locations) to limit it to one location. Only pass full: true when you specifically need Grocy\'s full per-product records (units, min-stock settings, prices); that response is 100k+ characters for a few dozen products and will flood your context.',
           inputSchema: {
             type: 'object',
             properties: {
-              compact: {
-                type: 'boolean',
-                description: 'Return one short row per stock entry (product id and name, amount, location name, best-before date) instead of the very large full response. Recommended.'
-              },
               locationId: {
                 type: 'number',
-                description: 'Only return stock stored in this location (get ids from get_locations). Implies compact.'
+                description: 'Only return stock stored in this location (ids from get_locations).'
+              },
+              full: {
+                type: 'boolean',
+                description: 'Return Grocy\'s full, very large per-product response instead of short rows. Avoid unless you need the extra product fields. Cannot be combined with locationId.'
               }
             },
             required: [],
@@ -1218,10 +1218,18 @@ class GrocyApiServer {
         case 'get_recipes':
           return await this.handleGrocyApiCall('/objects/recipes', 'Get all recipes');
         case 'get_stock':
-          if (request.params.arguments?.compact || request.params.arguments?.locationId !== undefined) {
-            return await this.handleCompactStock(request.params.arguments);
+          {
+            const stockArgs = request.params.arguments || {};
+            // compact:false was the opt-out of the earlier, opt-in design; keep honouring it.
+            const wantFull = stockArgs.full === true || stockArgs.compact === false;
+            if (wantFull) {
+              if (stockArgs.locationId !== undefined) {
+                throw new McpError(ErrorCode.InvalidParams, 'locationId cannot be combined with full: true (the full /stock response cannot be filtered by location)');
+              }
+              return await this.handleGrocyApiCall('/stock', 'Get current stock');
+            }
+            return await this.handleCompactStock(stockArgs);
           }
-          return await this.handleGrocyApiCall('/stock', 'Get current stock');
         case 'batch_api_calls':
           return await this.handleBatchApiCalls(request.params.arguments);
         case 'bulk_purchase_products':
@@ -1688,7 +1696,7 @@ class GrocyApiServer {
     return this.textResult({ total: items.length, failed, results }, failed > 0);
   }
 
-  /** One short row per stock entry, optionally limited to a single location. */
+  /** Default get_stock: one short row per stock entry, optionally limited to a single location. */
   private async handleCompactStock(args: any) {
     const locationId = args?.locationId;
     if (locationId !== undefined && !Number.isInteger(locationId)) {
