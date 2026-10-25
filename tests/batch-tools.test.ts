@@ -305,3 +305,15 @@ describe('get_stock (compact)', () => {
     expect(recorded.map((r) => r.url)).toEqual(['/api/stock']);
   });
 });
+
+describe('tool descriptions (guidance for the model)', () => {
+  it('steers the model toward compact stock and batch tools', async () => {
+    const { tools } = await client.listTools();
+    const desc = (name: string) => tools.find((t) => t.name === name)?.description ?? '';
+    expect(desc('get_stock')).toMatch(/PREFER compact/);
+    expect(desc('get_stock')).toMatch(/context/);
+    expect(desc('purchase_product')).toMatch(/bulk_purchase_products/);
+    expect(desc('create_recipe')).toMatch(/ingredients/);
+    expect(desc('batch_api_calls')).toMatch(/more than two or three/);
+  });
+});

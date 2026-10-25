@@ -580,17 +580,17 @@ class GrocyApiServer {
         },
         {
           name: 'get_stock',
-          description: 'Get current stock from your Grocy instance. The default response embeds every product\'s full record and can be very large; set compact (or locationId) to get one short row per stock entry instead.',
+          description: 'Get current stock from your Grocy instance. PREFER compact: true (or locationId) for almost every question about what is in stock: it returns short rows (product, amount, location, best-before date). Without it the response is one row per product with the full product record embedded, which is 100k+ characters for a few dozen products and will flood your context. Only omit compact when you specifically need those full product fields (units, min-stock settings, prices). Compact rows are per stock entry, so a product bought on two dates appears twice.',
           inputSchema: {
             type: 'object',
             properties: {
               compact: {
                 type: 'boolean',
-                description: 'Return one short row per stock entry: product id and name, amount, location name, best-before date.'
+                description: 'Return one short row per stock entry (product id and name, amount, location name, best-before date) instead of the very large full response. Recommended.'
               },
               locationId: {
                 type: 'number',
-                description: 'Only return stock stored in this location. Implies compact.'
+                description: 'Only return stock stored in this location (get ids from get_locations). Implies compact.'
               }
             },
             required: [],
@@ -598,7 +598,7 @@ class GrocyApiServer {
         },
         {
           name: 'batch_api_calls',
-          description: `Run several Grocy API calls server-side in one request, in order. Each call is {method, endpoint, body?} with a relative endpoint such as "objects/products" (max ${MAX_BATCH_ITEMS} calls). Returns one result per call. Continues past failures unless stopOnError is true.`,
+          description: `Run several Grocy API calls server-side in one request, in order. Use this whenever you would otherwise make more than two or three separate calls (creating many products, chained writes). Each call is {method, endpoint, body?} with a relative endpoint such as "objects/products" (max ${MAX_BATCH_ITEMS} calls). Returns one result per call, so avoid batching large GETs. Continues past failures unless stopOnError is true.`,
           inputSchema: {
             type: 'object',
             properties: {
@@ -754,7 +754,7 @@ class GrocyApiServer {
         },
         {
           name: 'create_recipe',
-          description: 'Create a new recipe in your Grocy instance, optionally with its ingredients in the same call.',
+          description: 'Create a new recipe in your Grocy instance. Pass ingredients (productId and amount each; product ids from get_products) to create the recipe and all its ingredient rows in this one call instead of adding them separately.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -801,7 +801,7 @@ class GrocyApiServer {
         },
         {
           name: 'purchase_product',
-          description: 'Track a product purchase in your Grocy instance.',
+          description: 'Track a purchase of ONE product. For several products (a receipt, a shopping trip) use bulk_purchase_products instead of calling this repeatedly.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -991,7 +991,7 @@ class GrocyApiServer {
         },
         {
           name: 'get_stock_by_location',
-          description: 'Get all stock from a specific location in your Grocy instance.',
+          description: 'Get the raw stock entries for one location (ids from get_locations). For a readable list with product names, use get_stock with locationId instead.',
           inputSchema: {
             type: 'object',
             properties: {
