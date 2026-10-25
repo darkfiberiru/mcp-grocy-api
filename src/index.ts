@@ -1364,15 +1364,8 @@ class GrocyApiServer {
             throw new McpError(ErrorCode.InvalidParams, 'locationId is required');
           }
           
-          // Use the handleCustomGrocyApiCall approach which has been working better for special endpoints
-          return await this.handleCustomGrocyApiCall({
-            params: {
-              arguments: {
-                endpoint: `stock?location_id=${stockLocationId}`,
-                method: 'GET'
-              }
-            }
-          });
+          // Grocy's /stock endpoint ignores location_id; the per-location entries endpoint does the filtering
+          return await this.handleGrocyApiCall(`/stock/locations/${stockLocationId}/entries`, 'Get stock by location', {});
         case 'consume_recipe':
           const { recipeId: recipeToConsumeId, servings: recipeConsumeServings = 1 } = request.params.arguments || {};
           if (!recipeToConsumeId) {
