@@ -20,6 +20,28 @@ import { z } from 'zod';
 
 // Debug output to help identify version and naming issues
 console.error(`Starting ${SERVER_NAME} server version ${VERSION}`);
+console.error(
+  `[startup] node ${process.version} on ${process.platform}, pid ${process.pid}, ` +
+  `GROCY_BASE_URL ${process.env.GROCY_BASE_URL ? 'set' : 'not set'}, ` +
+  `GROCY_APIKEY_VALUE ${process.env.GROCY_APIKEY_VALUE ? 'set' : 'not set'}`
+);
+
+// Anything that kills the process should leave a trace on stderr, which the
+// MCP client records in its server log. Never log secret values here.
+process.on('uncaughtException', (error) => {
+  console.error('[fatal] uncaught exception:', error?.stack || error);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[fatal] unhandled promise rejection:', (reason as any)?.stack || reason);
+  process.exit(1);
+});
+process.on('exit', (code) => {
+  console.error(`[shutdown] process exiting with code ${code}`);
+});
+process.stdin.on('end', () => {
+  console.error('[shutdown] stdin closed by the MCP client');
+});
 
 if (!process.env.GROCY_BASE_URL) {
   console.error('GROCY_BASE_URL environment variable is not set. Setting default to http://localhost:9283');

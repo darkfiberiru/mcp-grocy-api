@@ -335,3 +335,21 @@ describe('tool descriptions (guidance for the model)', () => {
     expect(desc('batch_api_calls')).toMatch(/more than two or three/);
   });
 });
+
+describe('startup diagnostics', () => {
+  it('logs a startup line and a clean shutdown to stderr without leaking the API key', async () => {
+    const { spawn } = await import('node:child_process');
+    const child = spawn(process.execPath, [entry], {
+      env: { ...process.env, GROCY_BASE_URL: 'http://127.0.0.1:1', GROCY_APIKEY_VALUE: 'super-secret-key', ENABLE_HTTP_SERVER: 'false' },
+      stdio: ['pipe', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    child.stderr.on('data', (d) => (stderr += d));
+    await new Promise((r) => setTimeout(r, 1500));
+    child.stdin.end();
+    await new Promise((r) => child.once('exit', r));
+    expect(stderr).toMatch(/\[startup\] node v\d+.* GROCY_BASE_URL set, GROCY_APIKEY_VALUE set/);
+    expect(stderr).toMatch(/\[shutdown\] stdin closed by the MCP client/);
+    expect(stderr).not.toContain('super-secret-key');
+  }, 20_000);
+});
