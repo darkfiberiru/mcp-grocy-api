@@ -134,6 +134,10 @@ interface ResponseObject {
 
 const normalizeBaseUrl = (url: string): string => url.replace(/\/+$/, '');
 
+// Upper bound on items accepted by the batch-style tools (batch_api_calls,
+// bulk_purchase_products, create_recipe ingredients).
+const MAX_BATCH_ITEMS = 100;
+
 const isValidEndpointArgs = (args: any): args is EndpointArgs => {
   if (typeof args !== 'object' || args === null) return false;
   if (!['GET', 'POST', 'PUT', 'DELETE'].includes(args.method)) return false;
@@ -576,11 +580,76 @@ class GrocyApiServer {
         },
         {
           name: 'get_stock',
-          description: 'Get current stock from your Grocy instance.',
+          description: 'Get current stock from your Grocy instance. The default response embeds every product\'s full record and can be very large; set compact (or locationId) to get one short row per stock entry instead.',
           inputSchema: {
             type: 'object',
-            properties: {},
+            properties: {
+              compact: {
+                type: 'boolean',
+                description: 'Return one short row per stock entry: product id and name, amount, location name, best-before date.'
+              },
+              locationId: {
+                type: 'number',
+                description: 'Only return stock stored in this location. Implies compact.'
+              }
+            },
             required: [],
+          },
+        },
+        {
+          name: 'batch_api_calls',
+          description: `Run several Grocy API calls server-side in one request, in order. Each call is {method, endpoint, body?} with a relative endpoint such as "objects/products" (max ${MAX_BATCH_ITEMS} calls). Returns one result per call. Continues past failures unless stopOnError is true.`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              calls: {
+                type: 'array',
+                description: 'Calls to run, in order',
+                items: {
+                  type: 'object',
+                  properties: {
+                    method: { type: 'string', enum: ['GET', 'POST', 'PUT', 'DELETE'] },
+                    endpoint: { type: 'string', description: 'Relative Grocy API endpoint, e.g. objects/products' },
+                    body: { type: 'object', description: 'JSON body for POST/PUT' }
+                  },
+                  required: ['method', 'endpoint']
+                }
+              },
+              stopOnError: {
+                type: 'boolean',
+                description: 'Stop at the first failed call (default: false)'
+              }
+            },
+            required: ['calls'],
+          },
+        },
+        {
+          name: 'bulk_purchase_products',
+          description: `Record many purchases in one call, e.g. a whole receipt (max ${MAX_BATCH_ITEMS} items). Each item takes the same fields as purchase_product; storeId and locationId at the top level are defaults for items that omit them.`,
+          inputSchema: {
+            type: 'object',
+            properties: {
+              items: {
+                type: 'array',
+                description: 'Purchases to record',
+                items: {
+                  type: 'object',
+                  properties: {
+                    productId: { type: 'number' },
+                    amount: { type: 'number', description: 'Default: 1' },
+                    price: { type: 'number' },
+                    bestBeforeDate: { type: 'string', description: 'YYYY-MM-DD (default: today + 1 year)' },
+                    locationId: { type: 'number' },
+                    storeId: { type: 'number' },
+                    note: { type: 'string' }
+                  },
+                  required: ['productId']
+                }
+              },
+              storeId: { type: 'number', description: 'Default store for every item' },
+              locationId: { type: 'number', description: 'Default storage location for every item' }
+            },
+            required: ['items'],
           },
         },
         {
@@ -685,13 +754,27 @@ class GrocyApiServer {
         },
         {
           name: 'create_recipe',
-          description: 'Create a new recipe in your Grocy instance.',
+          description: 'Create a new recipe in your Grocy instance, optionally with its ingredients in the same call.',
           inputSchema: {
             type: 'object',
             properties: {
               name: {
                 type: 'string',
                 description: 'Name of the recipe'
+              },
+              ingredients: {
+                type: 'array',
+                description: 'Optional ingredient rows to add to the recipe after creating it',
+                items: {
+                  type: 'object',
+                  properties: {
+                    productId: { type: 'number' },
+                    amount: { type: 'number' },
+                    quantityUnitId: { type: 'number', description: 'Defaults to the product\'s stock unit' },
+                    note: { type: 'string' }
+                  },
+                  required: ['productId', 'amount']
+                }
               },
               description: {
                 type: 'string',
@@ -1135,7 +1218,14 @@ class GrocyApiServer {
         case 'get_recipes':
           return await this.handleGrocyApiCall('/objects/recipes', 'Get all recipes');
         case 'get_stock':
+          if (request.params.arguments?.compact || request.params.arguments?.locationId !== undefined) {
+            return await this.handleCompactStock(request.params.arguments);
+          }
           return await this.handleGrocyApiCall('/stock', 'Get current stock');
+        case 'batch_api_calls':
+          return await this.handleBatchApiCalls(request.params.arguments);
+        case 'bulk_purchase_products':
+          return await this.handleBulkPurchase(request.params.arguments);
         case 'get_batteries':
           return await this.handleGrocyApiCall('/objects/batteries', 'Get all batteries');
         case 'get_equipment':
@@ -1200,22 +1290,7 @@ class GrocyApiServer {
             body: inventoryData
           });
         case 'create_recipe':
-          const { name: recipeName, description: recipeDesc = '', servings: recipeServings = 1, baseServingAmount = 1, desiredServings = 1 } = request.params.arguments || {};
-          if (!recipeName) {
-            throw new McpError(ErrorCode.InvalidParams, 'Recipe name is required');
-          }
-          
-          const recipeData: Record<string, any> = {
-            name: recipeName,
-            description: recipeDesc,
-            base_servings: recipeServings,
-            desired_servings: desiredServings
-          };
-          
-          return await this.handleGrocyApiCall('/objects/recipes', 'Create recipe', {
-            method: 'POST',
-            body: recipeData
-          });
+          return await this.handleCreateRecipe(request.params.arguments);
         case 'purchase_product':
           const { productId: purchaseProductId, amount: purchaseAmount = 1, bestBeforeDate: purchaseBBD, price, storeId, locationId: purchaseLocation, note: purchaseNote } = request.params.arguments || {};
           if (!purchaseProductId) {
@@ -1451,6 +1526,202 @@ class GrocyApiServer {
     } catch (error) {
       console.error('Error stringifying JSON:', error);
       return JSON.stringify({ error: 'Error formatting response data' }, null, 2);
+    }
+  }
+
+  private textResult(data: any, isError = false) {
+    return {
+      content: [{ type: 'text', text: this.safeJsonStringify(data) }],
+      ...(isError ? { isError: true } : {}),
+    };
+  }
+
+  /** Run several Grocy API calls in order, server-side, and return one result per call. */
+  private async handleBatchApiCalls(args: any) {
+    const calls = args?.calls;
+    const stopOnError = args?.stopOnError === true;
+    if (!Array.isArray(calls) || calls.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, 'calls must be a non-empty array');
+    }
+    if (calls.length > MAX_BATCH_ITEMS) {
+      throw new McpError(ErrorCode.InvalidParams, `Too many calls (${calls.length}); the maximum is ${MAX_BATCH_ITEMS}`);
+    }
+    // Validate everything up front so a bad entry can't leave a half-run batch.
+    calls.forEach((call: any, i: number) => {
+      const valid = call && typeof call === 'object'
+        && ['GET', 'POST', 'PUT', 'DELETE'].includes(call.method)
+        && typeof call.endpoint === 'string' && call.endpoint.trim() !== ''
+        && !/^(https?:\/\/|www\.)/i.test(call.endpoint);
+      if (!valid) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `calls[${i}] must be {method: GET|POST|PUT|DELETE, endpoint: relative path, body?}`
+        );
+      }
+    });
+
+    const results: any[] = [];
+    let failed = 0;
+    for (let i = 0; i < calls.length; i++) {
+      const { method, endpoint, body = null } = calls[i];
+      try {
+        const data = await this.makeApiRequest(`/${endpoint.replace(/^\/+/, '')}`, method, body);
+        results.push({ index: i, ok: true, data });
+      } catch (error: any) {
+        failed++;
+        results.push({ index: i, ok: false, error: error.message });
+        if (stopOnError) break;
+      }
+    }
+    return this.textResult({ total: calls.length, executed: results.length, failed, results }, failed > 0);
+  }
+
+  /** Create a recipe and, if given, its ingredient rows. */
+  private async handleCreateRecipe(args: any) {
+    const { name, description = '', servings = 1, desiredServings = 1, ingredients } = args || {};
+    if (!name) {
+      throw new McpError(ErrorCode.InvalidParams, 'Recipe name is required');
+    }
+    if (ingredients !== undefined) {
+      if (!Array.isArray(ingredients) || ingredients.length > MAX_BATCH_ITEMS) {
+        throw new McpError(ErrorCode.InvalidParams, `ingredients must be an array of at most ${MAX_BATCH_ITEMS} items`);
+      }
+      ingredients.forEach((ing: any, i: number) => {
+        if (!ing || typeof ing.productId !== 'number' || typeof ing.amount !== 'number') {
+          throw new McpError(ErrorCode.InvalidParams, `ingredients[${i}] needs a numeric productId and amount`);
+        }
+      });
+    }
+
+    let created: any;
+    try {
+      created = await this.makeApiRequest('/objects/recipes', 'POST', {
+        name,
+        description,
+        base_servings: servings,
+        desired_servings: desiredServings,
+      });
+    } catch (error: any) {
+      return this.textResult({ error: `Failed to create recipe: ${error.message}` }, true);
+    }
+    if (!ingredients || ingredients.length === 0) {
+      return this.textResult(created);
+    }
+
+    const recipeId = created?.created_object_id;
+    if (recipeId === undefined) {
+      return this.textResult({ error: 'Recipe was created but Grocy did not return its id; no ingredients were added', recipe: created }, true);
+    }
+
+    const results: any[] = [];
+    let failed = 0;
+    for (let i = 0; i < ingredients.length; i++) {
+      const ing = ingredients[i];
+      try {
+        let quId = ing.quantityUnitId;
+        if (quId === undefined) {
+          const product = await this.makeApiRequest(`/objects/products/${ing.productId}`, 'GET');
+          quId = product?.qu_id_stock;
+        }
+        const row: Record<string, any> = {
+          recipe_id: recipeId,
+          product_id: ing.productId,
+          amount: ing.amount,
+          qu_id: quId,
+        };
+        if (ing.note) row.note = ing.note;
+        await this.makeApiRequest('/objects/recipes_pos', 'POST', row);
+        results.push({ index: i, productId: ing.productId, ok: true });
+      } catch (error: any) {
+        failed++;
+        results.push({ index: i, productId: ing.productId, ok: false, error: error.message });
+      }
+    }
+    return this.textResult({ recipe: created, ingredients: { total: ingredients.length, failed, results } }, failed > 0);
+  }
+
+  /** Record many purchases (e.g. a receipt) in one call. */
+  private async handleBulkPurchase(args: any) {
+    const items = args?.items;
+    if (!Array.isArray(items) || items.length === 0) {
+      throw new McpError(ErrorCode.InvalidParams, 'items must be a non-empty array');
+    }
+    if (items.length > MAX_BATCH_ITEMS) {
+      throw new McpError(ErrorCode.InvalidParams, `Too many items (${items.length}); the maximum is ${MAX_BATCH_ITEMS}`);
+    }
+    items.forEach((item: any, i: number) => {
+      if (!item || typeof item.productId !== 'number') {
+        throw new McpError(ErrorCode.InvalidParams, `items[${i}] needs a numeric productId`);
+      }
+      if (item.amount !== undefined && !(typeof item.amount === 'number' && item.amount > 0)) {
+        throw new McpError(ErrorCode.InvalidParams, `items[${i}].amount must be a positive number`);
+      }
+    });
+
+    const defaultBestBefore = new Date();
+    defaultBestBefore.setFullYear(defaultBestBefore.getFullYear() + 1);
+    const defaultBestBeforeDate = defaultBestBefore.toISOString().split('T')[0];
+
+    const results: any[] = [];
+    let failed = 0;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      const body: Record<string, any> = {
+        amount: item.amount ?? 1,
+        transaction_type: 'purchase',
+        best_before_date: item.bestBeforeDate || defaultBestBeforeDate,
+      };
+      if (item.price !== undefined) body.price = item.price;
+      const storeId = item.storeId ?? args.storeId;
+      if (storeId) body.shopping_location_id = storeId;
+      const locationId = item.locationId ?? args.locationId;
+      if (locationId) body.location_id = locationId;
+      if (item.note) body.note = item.note;
+      try {
+        await this.makeApiRequest(`/stock/products/${item.productId}/add`, 'POST', body);
+        results.push({ index: i, productId: item.productId, ok: true });
+      } catch (error: any) {
+        failed++;
+        results.push({ index: i, productId: item.productId, ok: false, error: error.message });
+      }
+    }
+    return this.textResult({ total: items.length, failed, results }, failed > 0);
+  }
+
+  /** One short row per stock entry, optionally limited to a single location. */
+  private async handleCompactStock(args: any) {
+    const locationId = args?.locationId;
+    if (locationId !== undefined && !Number.isInteger(locationId)) {
+      throw new McpError(ErrorCode.InvalidParams, 'locationId must be an integer');
+    }
+    try {
+      const [products, locations] = await Promise.all([
+        this.makeApiRequest('/objects/products', 'GET'),
+        this.makeApiRequest('/objects/locations', 'GET'),
+      ]);
+      const productNames = new Map<number, string>((products || []).map((p: any) => [p.id, p.name]));
+      const locationNames = new Map<number, string>((locations || []).map((l: any) => [l.id, l.name]));
+      const locationIds: number[] = locationId !== undefined
+        ? [locationId]
+        : (locations || []).map((l: any) => l.id);
+
+      const rows: any[] = [];
+      for (const id of locationIds) {
+        const entries = await this.makeApiRequest(`/stock/locations/${id}/entries`, 'GET');
+        for (const entry of entries || []) {
+          rows.push({
+            productId: entry.product_id,
+            name: productNames.get(entry.product_id) ?? `product ${entry.product_id}`,
+            amount: entry.amount,
+            location: locationNames.get(id) ?? `location ${id}`,
+            bestBefore: entry.best_before_date,
+          });
+        }
+      }
+      rows.sort((a, b) => a.name.localeCompare(b.name));
+      return this.textResult({ count: rows.length, entries: rows });
+    } catch (error: any) {
+      return this.textResult({ error: `Failed to get compact stock: ${error.message}` }, true);
     }
   }
 
